@@ -273,34 +273,7 @@
                 <div id="appErrorMessage" class="alert" style="display: none;"></div>
             </form>
         </div>
-
-        <!-- Mikrotik Connection Form (Initially Hidden) -->
-        <div id="mikrotikLoginSection" style="display: none;">
-            <h2><img src="{{ url_for('static', filename='images/The IT Dad new logo.png') }}" alt="The IT Dad Logo" class="logo-image"></h2>
-            <p class="subtitle">Connect to Mikrotik Router</p>
-            <form id="mikrotikLoginForm"> 
-                <div class="form-group">
-                    <label for="routerHost">Router IP Address</label>
-                <input type="text" id="routerHost" placeholder="e.g., 192.168.88.1" required value="192.168.88.1">
-            </div>
-            <div class="form-group">
-                <label for="routerPort">API Port</label>
-                <input type="number" id="routerPort" placeholder="e.g., 8728" required value="8728">
-            </div>
-            <div class="form-group">
-                <label for="routerUsername">Username</label>
-                <input type="text" id="routerUsername" placeholder="e.g., admin" required value="admin">
-            </div>
-            <div class="form-group">
-                <label for="routerPassword">Password</label>
-                <input type="password" id="routerPassword" placeholder="Enter password" required>
-            </div>
-            <button type="submit" class="login-button">
-                <i class="fas fa-plug"></i> Connect to Router
-            </button>
-            <div id="mikrotikErrorMessage" class="alert" style="display: none;"></div> 
-            </form>
-        </div>
+        <!-- Mikrotik Connection Form has been removed. Redirection to dashboard will occur after app login. -->
     </div>
     <footer class="login-footer">
         <p><i class="fas fa-user-shield"></i><strong>The IT Dad</strong></p>
@@ -380,11 +353,11 @@
             .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
             .then(({ ok, status, data }) => {
                 if (ok && data.success) {
-                    appErrorMessageDiv.textContent = data.message || _('Successfully connected! Redirecting...');
-                    appErrorMessageDiv.className = 'alert alert-success';
-                    appErrorMessageDiv.style.display = 'block';
-                    document.getElementById('appLoginSection').style.display = 'none';
-                    document.getElementById('mikrotikLoginSection').style.display = 'block';
+                    // appErrorMessageDiv.textContent = data.message || _('Successfully connected! Redirecting...');
+                    // appErrorMessageDiv.className = 'alert alert-success';
+                    // appErrorMessageDiv.style.display = 'block';
+                    // Directly redirect to dashboard
+                    window.location.href = '/dashboard';
                 } else {
                     appErrorMessageDiv.textContent = data.message || _('Connection failed (Error {0}). Please check details and try again.', status);
                     appErrorMessageDiv.className = 'alert alert-danger';
@@ -405,73 +378,8 @@
             });
         });
 
-        // Mikrotik Login Form Handler
-        document.getElementById('mikrotikLoginForm').addEventListener('submit', function(event) {
-            event.preventDefault();
-            const csrfToken = getCsrfToken(); 
-
-            const host = document.getElementById('routerHost').value;
-            const port = document.getElementById('routerPort').value;
-            const username = document.getElementById('routerUsername').value;
-            const password = document.getElementById('routerPassword').value;
-            const mikrotikErrorMessageDiv = document.getElementById('mikrotikErrorMessage'); 
-            const connectButton = this.querySelector('button[type="submit"]');
-            const originalButtonHTML = connectButton.innerHTML;
-
-            mikrotikErrorMessageDiv.textContent = '';
-            mikrotikErrorMessageDiv.style.display = 'none';
-            mikrotikErrorMessageDiv.className = 'alert';
-
-            if (!host || !port || !username) {
-                mikrotikErrorMessageDiv.textContent = _('Router IP, Port, and Username are required.');
-                mikrotikErrorMessageDiv.className = 'alert alert-danger';
-                mikrotikErrorMessageDiv.style.display = 'block';
-                return;
-            }
-            if (parseInt(port) <= 0 || parseInt(port) > 65535) {
-                 mikrotikErrorMessageDiv.textContent = _('Please enter a valid port number (1-65535).');
-                 mikrotikErrorMessageDiv.className = 'alert alert-danger';
-                 mikrotikErrorMessageDiv.style.display = 'block';
-                return;
-            }
-
-            connectButton.disabled = true;
-            connectButton.innerHTML = `<span class="loading-spinner"></span> ${_('Connecting...')}`;
-
-            fetch('/api/initial-connect', { 
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': csrfToken 
-                },
-                body: JSON.stringify({ host, port: parseInt(port), username, password }),
-            })
-            .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-            .then(({ ok, status, data }) => {
-                if (ok && data.success) {
-                    mikrotikErrorMessageDiv.textContent = data.message || _('Successfully connected! Redirecting...');
-                    mikrotikErrorMessageDiv.className = 'alert alert-success';
-                    mikrotikErrorMessageDiv.style.display = 'block';
-                    window.location.href = '/dashboard';
-                } else {
-                    mikrotikErrorMessageDiv.textContent = data.message || _('Connection failed (Error {0}). Please check details and try again.', status);
-                    mikrotikErrorMessageDiv.className = 'alert alert-danger';
-                    mikrotikErrorMessageDiv.style.display = 'block';
-                }
-            })
-            .catch(error => {
-                console.error('Error during Mikrotik connect fetch:', error);
-                mikrotikErrorMessageDiv.textContent = _('Network error or server is unreachable.');
-                mikrotikErrorMessageDiv.className = 'alert alert-danger';
-                mikrotikErrorMessageDiv.style.display = 'block';
-            })
-            .finally(() => {
-                if (!mikrotikErrorMessageDiv.classList.contains('alert-success')) {
-                    connectButton.disabled = false;
-                    connectButton.innerHTML = originalButtonHTML;
-                }
-            });
-        });
+        // Mikrotik Login Form Handler - This entire block is now removed as the form is gone.
+        // document.getElementById('mikrotikLoginForm').addEventListener('submit', function(event) { ... });
 
         // Theme Loading Logic for login.html
         function applyLoginTheme(theme) {

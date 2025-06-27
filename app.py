@@ -114,16 +114,21 @@ class ConfigLoader:
         """Load configuration from config.json or create default if not exists.
         Environment variables take precedence over config.json values for sensitive data."""
 
-        # Define default structure (especially for non-sensitive parts or fallbacks)
-        cfg = {
-            "mikrotik": {
-                "host": "192.168.88.1",
-                "port": 8728,
-                "username": "admin",
-                "password": "",  # Sensitive, prioritize ENV
-                "use_ssl": False,
-                "hotspot_login_url": "http://hotspot.setup/login"
-            },
+        # Define default structure for the new multi-router format
+        default_cfg = {
+            "routers": [
+                {
+                    "id": "default-router",
+                    "name": "Default Router",
+                    "host": "192.168.88.1",
+                    "port": 8728,
+                    "username": "admin",
+                    "password": "",  # Sensitive, prioritize ENV if a global ENV var is used for the default
+                    "use_ssl": False,
+                    "hotspot_login_url": "http://hotspot.setup/login"
+                }
+            ],
+            "active_router_id": "default-router", # Or None if no default active router
             "server": {
                 "host": "0.0.0.0",
                 "port": 5000,
@@ -134,54 +139,51 @@ class ConfigLoader:
             },
             "app_admin": {
                 "username": "admin", # Sensitive, prioritize ENV
-                "password_hash": "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9"  # Sensitive, prioritize ENV
+                "password_hash": "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9"  # Sensitive, prioritize ENV for "changeme"
             }
         }
 
         # Load from config.json if it exists
-        json_config = {}
+        cfg = default_cfg.copy() # Start with defaults, then overwrite with file content
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r') as f:
                     json_config = json.load(f)
+                # Merge loaded JSON into the default structure carefully
+                cfg['routers'] = json_config.get('routers', default_cfg['routers'])
+                cfg['active_router_id'] = json_config.get('active_router_id', default_cfg['active_router_id'])
+                if 'server' in json_config:
+                    cfg['server'].update(json_config['server'])
+                if 'app_admin' in json_config:
+                    cfg['app_admin'].update(json_config['app_admin'])
+
             except json.JSONDecodeError:
                 logger.error(f"Error decoding JSON from {self.config_file}. Using defaults and environment variables.", exc_info=True)
+                # cfg remains default_cfg in this case
         else:
-            # If config file doesn't exist, write the default structure (values might be overridden by ENV)
+            # If config file doesn't exist, write the default structure
             try:
                 with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4) # Write the initial default structure
+                    json.dump(default_cfg, f, indent=4)
                 logger.info(f"Default configuration file created at {self.config_file}")
             except IOError:
                 logger.error(f"Could not write default config file to {self.config_file}", exc_info=True)
 
+        # Environment variable overrides
+        # For router-specific settings, ENV vars become tricky.
+        # A common pattern is to use prefixed ENV vars, e.g., MIKROTIK_ROUTER_0_HOST, MIKROTIK_ROUTER_0_PASSWORD.
+        # For simplicity in this iteration, we'll assume ENV vars might override the *first* router's details if set,
+        # or a specific router if its ID is known and matched (more complex).
+        # Let's assume for now that global MIKROTIK_HOST, etc., apply to the router with ID 'default-router' if it exists
+        # or the first router in the list if 'default-router' is not present.
+        # This part needs careful design based on how ENV var overrides should behave with multiple routers.
 
-        # Merge json_config into cfg (json_config takes precedence over hardcoded defaults here)
-        if json_config.get('mikrotik'):
-            cfg['mikrotik'].update(json_config['mikrotik'])
-        if json_config.get('server'):
-            cfg['server'].update(json_config['server'])
-        if json_config.get('app_admin'):
-            cfg['app_admin'].update(json_config['app_admin'])
+        # For now, we'll keep ENV var overrides for app_admin and server as they were.
+        # Router-specific ENV var handling will be skipped in this pass for _load_config,
+        # implying router details are primarily managed via config.json or API calls.
+        # This simplifies the initial refactor. A more robust ENV var strategy for multiple
+        # routers can be a future enhancement if needed.
 
-        # Environment variable overrides for Mikrotik
-        cfg['mikrotik']['host'] = os.environ.get('MIKROTIK_HOST', cfg['mikrotik']['host'])
-        cfg['mikrotik']['port'] = int(os.environ.get('MIKROTIK_PORT', cfg['mikrotik']['port']))
-        cfg['mikrotik']['username'] = os.environ.get('MIKROTIK_USERNAME', cfg['mikrotik']['username'])
-        mikrotik_password_env = os.environ.get('MIKROTIK_PASSWORD')
-        if mikrotik_password_env is not None:
-            cfg['mikrotik']['password'] = mikrotik_password_env
-            logger.info("Mikrotik password loaded from MIKROTIK_PASSWORD environment variable.")
-        elif not cfg['server'].get('debug') and cfg['mikrotik']['password']:
-             logger.warning("MIKROTIK_PASSWORD environment variable not set. Loading Mikrotik password from config.json. This is not recommended for production.")
-
-
-        mikrotik_use_ssl_env = os.environ.get('MIKROTIK_USE_SSL')
-        if mikrotik_use_ssl_env is not None:
-            cfg['mikrotik']['use_ssl'] = mikrotik_use_ssl_env.lower() in ['true', '1', 'yes']
-        cfg['mikrotik']['hotspot_login_url'] = os.environ.get('MIKROTIK_HOTSPOT_LOGIN_URL', cfg['mikrotik']['hotspot_login_url'])
-
-        # Environment variable overrides for App Admin
         cfg['app_admin']['username'] = os.environ.get('APP_ADMIN_USERNAME', cfg['app_admin']['username'])
         app_admin_password_hash_env = os.environ.get('APP_ADMIN_PASSWORD_HASH')
         if app_admin_password_hash_env:
@@ -200,13 +202,10 @@ class ConfigLoader:
             cfg['server']['debug'] = False
 
 
-        # Log which source was used for sensitive data if debug is false
+        # Log which source was used for sensitive data if debug is false (for app_admin)
         if not cfg['server'].get('debug'):
-            if mikrotik_password_env:
-                logger.info("Using Mikrotik password from environment variable.")
-            elif cfg['mikrotik']['password']: # Only log if a password was actually found in config
-                logger.warning("SECURITY WARNING: Using Mikrotik password from config.json. Set MIKROTIK_PASSWORD environment variable for production.")
-
+            # Note: Mikrotik password logging per router would be more complex here
+            # and is skipped for now as global ENV vars for router passwords are not yet fully implemented for multi-router.
             if app_admin_password_hash_env:
                 logger.info("Using App Admin password hash from environment variable.")
             elif cfg['app_admin']['password_hash'] != "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9": # Default for "changeme"
@@ -220,30 +219,26 @@ class ConfigLoader:
     def get_config(self):
         return self.config
 
+    def _save_config(self):
+        """Saves the current self.config state to the config.json file."""
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            logger.info(f"Configuration saved to {self.config_file}")
+            return True
+        except IOError:
+            logger.error(f"Could not write configuration to {self.config_file}", exc_info=True)
+            return False
+
     def update_config(self, new_config_data):
-        """Updates specified parts of the configuration and saves to config.json.
-        Does NOT update values that are primarily sourced from environment variables
-        (like passwords, admin username/hash if they were set by env vars).
-        This method is mainly for settings like Mikrotik host/port (if not set by env),
-        server settings, or hotspot_login_url.
+        """Updates specified parts of the configuration (server, app_admin general settings)
+        and saves to config.json.
+        Does NOT handle router list modifications or active_router_id changes here.
+        Use specific methods for router management (add_router, update_router, etc.).
         """
         changes_made = False
-
-        # Update Mikrotik settings (excluding password if it was from ENV)
-        if 'mikrotik' in new_config_data:
-            mk_changes = new_config_data['mikrotik']
-            # Only update if not overridden by ENV. This logic gets complex.
-            # Simpler: allow update, but ENV will override on next load.
-            # Or, prevent updating fields managed by ENV.
-            # For now, let's allow updates to config.json, ENV will always win on load.
-            self.config['mikrotik'].update(mk_changes)
-            changes_made = True
-            # Specific check: do not overwrite password in config if it came from ENV
-            if os.environ.get('MIKROTIK_PASSWORD') and 'password' in mk_changes:
-                 logger.warning("Attempted to update Mikrotik password in config.json while MIKROTIK_PASSWORD env var is set. Config.json change will be ignored on next load if env var persists.")
-
-
-        if 'server' in new_config_data:
+        # Example: Updating server settings.
+        if 'server' in new_config_data and isinstance(new_config_data['server'], dict):
             self.config['server'].update(new_config_data['server'])
             changes_made = True
 
@@ -255,42 +250,159 @@ class ConfigLoader:
             # self.config['app_admin'].update(new_config_data.get('app_admin', {})) # Example if we wanted to allow some app_admin changes
 
         if changes_made:
-            try:
-                with open(self.config_file, 'w') as f:
-                    json.dump(self.config, f, indent=4)
-                logger.info(f"Configuration updated in {self.config_file}")
-            except IOError:
-                logger.error(f"Could not write configuration to {self.config_file}", exc_info=True)
+            if self._save_config():
+                logger.info(f"Configuration updated (server/app_admin settings).")
         else:
-            logger.info("No changes applied to configuration file via update_config.")
+            logger.info("No server/app_admin changes applied to configuration file via update_config.")
+        return changes_made
 
 
     def update_admin_password_hash(self, new_password_hash: str) -> bool:
-        """Specifically updates the app_admin password_hash in config.json.
-        Returns True if successful, False otherwise.
-        This should only be called if the hash is NOT being sourced from an ENV var."""
+        """Specifically updates the app_admin password_hash in config.json."""
         if os.environ.get('APP_ADMIN_PASSWORD_HASH'):
             logger.error("Cannot update admin password hash in config.json because APP_ADMIN_PASSWORD_HASH environment variable is set.")
             return False
 
         self.config['app_admin']['password_hash'] = new_password_hash
-        try:
-            with open(self.config_file, 'w') as f:
-                json.dump(self.config, f, indent=4)
+        if self._save_config():
             logger.info(f"Admin password hash updated in {self.config_file}")
             return True
-        except IOError:
-            logger.error(f"Could not write admin password hash to {self.config_file}", exc_info=True)
-            return False
+        return False
+
+    def _generate_router_id(self, name_suggestion: str) -> str:
+        """Generates a unique router ID."""
+        # Simple approach: use name suggestion, sanitized, with a random suffix if needed
+        # This is a placeholder; a more robust unique ID generation might be needed.
+        sanitized_name = re.sub(r'\W+', '-', name_suggestion.lower())
+        router_id = sanitized_name
+        existing_ids = {r['id'] for r in self.config.get('routers', [])}
+        counter = 1
+        while router_id in existing_ids:
+            router_id = f"{sanitized_name}-{counter}"
+            counter += 1
+        return router_id
+
+    def add_router(self, router_config: dict) -> tuple[bool, str, str | None]:
+        """Adds a new router configuration. router_config should include name, host, port, etc.
+        Generates a unique ID for the router.
+        Returns (success_status, message, new_router_id)."""
+        if 'id' in router_config: # ID should be generated by this method
+            del router_config['id']
+        if 'name' not in router_config or not router_config['name']:
+            return False, "Router name is required.", None
+
+        new_id = self._generate_router_id(router_config['name'])
+        router_config['id'] = new_id
+
+        # Ensure default values for missing optional fields
+        router_config.setdefault('port', 8728)
+        router_config.setdefault('username', 'admin')
+        router_config.setdefault('password', '')
+        router_config.setdefault('use_ssl', False)
+        router_config.setdefault('hotspot_login_url', '')
+
+        if 'routers' not in self.config:
+            self.config['routers'] = []
+        self.config['routers'].append(router_config)
+
+        if self._save_config():
+            logger.info(f"Router '{router_config['name']}' with ID '{new_id}' added.")
+            # If this is the first router, make it active
+            if len(self.config['routers']) == 1:
+                self.set_active_router_id(new_id) # This will also save
+            return True, f"Router '{router_config['name']}' added successfully.", new_id
+        return False, "Failed to save configuration after adding router.", None
+
+    def update_router(self, router_id: str, router_config_update: dict) -> tuple[bool, str]:
+        """Updates an existing router's configuration."""
+        routers = self.config.get('routers', [])
+        router_index = -1
+        for i, r in enumerate(routers):
+            if r.get('id') == router_id:
+                router_index = i
+                break
+
+        if router_index == -1:
+            return False, f"Router with ID '{router_id}' not found."
+
+        # Prevent changing the ID via this method
+        if 'id' in router_config_update:
+            del router_config_update['id']
+
+        self.config['routers'][router_index].update(router_config_update)
+        if self._save_config():
+            logger.info(f"Router ID '{router_id}' updated.")
+            return True, f"Router '{self.config['routers'][router_index].get('name', router_id)}' updated successfully."
+        return False, "Failed to save configuration after updating router."
+
+    def delete_router(self, router_id: str) -> tuple[bool, str]:
+        """Deletes a router configuration by its ID."""
+        original_length = len(self.config.get('routers', []))
+        self.config['routers'] = [r for r in self.config.get('routers', []) if r.get('id') != router_id]
+
+        if len(self.config.get('routers', [])) == original_length:
+            return False, f"Router with ID '{router_id}' not found."
+
+        if self._save_config():
+            logger.info(f"Router ID '{router_id}' deleted.")
+            # If the deleted router was the active one, clear active_router_id or set to another.
+            if self.config.get('active_router_id') == router_id:
+                self.config['active_router_id'] = self.config['routers'][0]['id'] if self.config['routers'] else None
+                self._save_config() # Save again if active_router_id changed
+            return True, f"Router ID '{router_id}' deleted successfully."
+        return False, "Failed to save configuration after deleting router."
+
+    def get_router_config(self, router_id: str) -> dict | None:
+        """Returns the configuration for a specific router by ID."""
+        for r in self.config.get('routers', []):
+            if r.get('id') == router_id:
+                return r.copy() # Return a copy
+        return None
+
+    def get_all_routers(self, include_credentials=False) -> list[dict]:
+        """Returns a list of all configured routers.
+        If include_credentials is False (default), passwords are omitted."""
+        routers = self.config.get('routers', [])
+        if include_credentials:
+            return [r.copy() for r in routers]
+        else:
+            return [{k: v for k, v in r.items() if k != 'password'} for r in routers]
+
+    def set_active_router_id(self, router_id: str | None) -> tuple[bool, str]:
+        """Sets the active_router_id. Pass None to clear."""
+        if router_id is None:
+            self.config['active_router_id'] = None
+            if self._save_config():
+                logger.info("Active router cleared.")
+                return True, "Active router cleared."
+            return False, "Failed to save configuration after clearing active router."
+
+        if not any(r.get('id') == router_id for r in self.config.get('routers', [])):
+            return False, f"Router ID '{router_id}' not found in configured routers."
+
+        self.config['active_router_id'] = router_id
+        if self._save_config():
+            logger.info(f"Active router set to ID '{router_id}'.")
+            return True, f"Active router set to '{router_id}'."
+        return False, "Failed to save configuration after setting active router."
+
+    def get_active_router_id(self) -> str | None:
+        """Gets the current active_router_id."""
+        return self.config.get('active_router_id')
+
+    def get_active_router_config(self) -> dict | None:
+        """Returns the configuration for the currently active router."""
+        active_id = self.get_active_router_id()
+        if active_id:
+            return self.get_router_config(active_id)
+        return None
 
     def reset_mikrotik_config_to_defaults(self):
-        """Resets the Mikrotik part of the configuration to its original defaults,
-        respecting that environment variables will still take precedence on next load."""
-        # Get the original default settings as defined in _load_config
-        # This is a bit indirect; _load_config itself returns a merged config.
-        # For true defaults, we define it here or access a pristine default structure.
-        # Let's re-fetch default structure as defined in _load_config's initial state.
-        original_default_settings = { # Replicating the default structure from _load_config
+        """Resets the 'routers' list to a single default router configuration
+        and sets it as the active router."""
+        default_router_config = {
+            "id": "default-router",
+            "name": "Default Router",
             "host": "192.168.88.1",
             "port": 8728,
             "username": "admin",
@@ -298,25 +410,18 @@ class ConfigLoader:
             "use_ssl": False,
             "hotspot_login_url": "http://hotspot.setup/login"
         }
-        # The server part of the config should remain untouched by this.
-        current_server_config = self.config.get('server', {}) 
+        self.config['routers'] = [default_router_config]
+        self.config['active_router_id'] = default_router_config['id']
         
-        update_payload = {
-            'mikrotik': original_default_settings,
-            'server': current_server_config # Ensure server settings are preserved
-        }
-        # Instead of self.update_config which merges, we want to overwrite mikrotik section
-        # and keep server section. So, construct the full new config.
-        self.config['mikrotik'] = original_default_settings
-        # self.config['server'] is already what it should be.
-        
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f, indent=4)
-        logger.info("Mikrotik configuration has been reset to defaults.")
+        if self._save_config():
+            logger.info("Mikrotik configuration (routers list and active_router_id) has been reset to defaults.")
+        else:
+            logger.error("Failed to save configuration after resetting Mikrotik defaults.")
 
 
 # Initialize ConfigLoader
 config_loader = ConfigLoader()
+app_config = config_loader.get_config() # This now holds the structure with 'routers' and 'active_router_id'
 app_config = config_loader.get_config()
 
 
@@ -727,25 +832,43 @@ def download_batch_vouchers_pdf():
         return jsonify({'success': False, 'message': f'An unexpected error occurred during PDF generation: {str(e)}'}), 500
 
 def get_mikrotik_api():
-    """Establishes and returns a single Mikrotik API connection per request."""
-    logger.debug(f"get_mikrotik_api: Current Mikrotik config host from module-level app_config: {app_config['mikrotik'].get('host')}")
-    if 'mikrotik_api' not in g:
-        logger.debug("get_mikrotik_api: 'mikrotik_api' not in g. Attempting new connection.")
-        # Fetch the latest config directly from the loader instance for new connections
-        current_loaded_config = config_loader.get_config() 
-        mikrotik_config = current_loaded_config['mikrotik']
-        logger.debug(f"get_mikrotik_api: Using host from config_loader.get_config(): {mikrotik_config.get('host')}")
+    """Establishes and returns a Mikrotik API connection for the currently active router."""
+    if 'mikrotik_api' in g and g.mikrotik_api is not None:
+        # This case implies a connection might already exist in 'g'.
+        # Depending on desired behavior (always new vs. reuse within request),
+        # this could return g.mikrotik_api or proceed to make a new one.
+        # For now, let's assume the teardown clears it, so this path means it's already set up for this request.
+        # However, the original logic always tried to create if not in g, so let's stick to that for now.
+        # If g.mikrotik_api exists and is valid, it means it was set by a previous call in the same request.
+        # This function's primary role is to establish it if not present in 'g'.
+        logger.debug("get_mikrotik_api: API object already exists in 'g'. Reusing.")
+        return g.mikrotik_api
+
+    if 'mikrotik_api' not in g: # Proceed only if not already set up in g for this request
+        logger.debug("get_mikrotik_api: 'mikrotik_api' not in g. Attempting new connection based on active router.")
         
-        host, port, username, password, use_ssl = (
-            mikrotik_config['host'], mikrotik_config['port'],
-            mikrotik_config['username'], mikrotik_config['password'],
-            mikrotik_config.get('use_ssl', False)
-        )
-        # Basic check for placeholder/default config before attempting connection
-        if host == "192.168.88.1" and username == "admin" and password == "" and not os.path.exists(config_loader.config_file):
-             logger.warning("get_mikrotik_api: Attempting to connect with default placeholder config and no config file saved yet. Connection will likely fail or use defaults.")
+        active_router_config = config_loader.get_active_router_config()
+
+        if not active_router_config:
+            logger.warning("get_mikrotik_api: No active router configured or found. Cannot establish connection.")
+            g.mikrotik_api = None # Explicitly set to None in g
+            g.pop('mikrotik_connection', None)
+            return None
+
+        host = active_router_config.get('host')
+        port = active_router_config.get('port')
+        username = active_router_config.get('username')
+        password = active_router_config.get('password')
+        use_ssl = active_router_config.get('use_ssl', False)
+        router_name = active_router_config.get('name', host) # For logging
+
+        if not host or not username: # Port can have a default, password can be empty
+            logger.error(f"get_mikrotik_api: Insufficient configuration for active router '{router_name}' (host or username missing).")
+            g.mikrotik_api = None
+            g.pop('mikrotik_connection', None)
+            return None
         
-        logger.info(f"Attempting to connect to Mikrotik: {host}:{port} (SSL: {use_ssl})")
+        logger.info(f"Attempting to connect to active Mikrotik router '{router_name}': {host}:{port} (SSL: {use_ssl})")
         api_connection_object = None  # Temporary holder for the connection object
         try:
             api_connection_object = librouteros.connect(
@@ -766,25 +889,22 @@ def get_mikrotik_api():
             g.mikrotik_api = None
             g.pop('mikrotik_connection', None) # Ensure it's removed from g
         except Exception as e: # Catch any other unexpected error during connection
-            logger.error(f"Unexpected generic error during Mikrotik connection in get_mikrotik_api: {type(e).__name__} - {e}")
+            logger.error(f"Unexpected generic error during Mikrotik connection to '{router_name}' in get_mikrotik_api: {type(e).__name__} - {e}")
             if api_connection_object: # If connect() returned an object before erroring
                 try:
-                    logger.debug("Attempting to close potentially partial Mikrotik connection (generic exception).")
+                    logger.debug(f"Attempting to close potentially partial Mikrotik connection object for '{router_name}' (generic exception).")
                     api_connection_object.close()
                 except Exception as close_e:
-                    logger.error(f"Error closing partial Mikrotik connection (generic exception): {close_e}")
+                    logger.error(f"Error closing partial Mikrotik connection object for '{router_name}' (generic exception): {close_e}")
             g.mikrotik_api = None
             g.pop('mikrotik_connection', None) # Ensure it's removed from g
-    else:
-        # This 'else' case should ideally not be hit frequently if teardown_connection runs after each request.
-        # If it is hit, it implies g.mikrotik_api persisted, which means teardown might not have run.
-        # For safety, we could add a check here too, but the primary model is new connection per request.
-        logger.warning("get_mikrotik_api: Reusing existing Mikrotik API from 'g'. This is unexpected with current teardown logic.")
-        # Potentially add a health check for existing g.mikrotik_api here if this path becomes common.
-        # For now, assume teardown works and this path is rare.
     
-    api_to_return = g.get('mikrotik_api', None)
-    logger.debug(f"get_mikrotik_api: Returning API object: {'Exists' if api_to_return else 'None'}")
+    # This 'else' case where 'mikrotik_api' is already in 'g' is handled at the beginning of the function.
+    # If we reach here, it means 'mikrotik_api' was not in 'g' or was None, and we attempted connection.
+    # The value of g.mikrotik_api (either the connection object or None if failed) is set by the logic above.
+
+    api_to_return = g.get('mikrotik_api', None) # This will be None if connection failed or no active router
+    logger.debug(f"get_mikrotik_api: Returning API object for router '{router_name if active_router_config else 'N/A'}': {'Exists' if api_to_return else 'None'}")
     return api_to_return
 
 @app.teardown_appcontext
@@ -1190,9 +1310,9 @@ def generate_qr_code_base64(login_url, username, password):
 def login_page():
     """Serves the login page. If already logged into the app, redirects to dashboard."""
     if current_user.is_authenticated:
-        api = get_mikrotik_api()
-        if api:
-            return redirect(url_for('index'))
+        # If user is already authenticated, always redirect to the dashboard.
+        # The dashboard will handle logic for router selection/configuration.
+        return redirect(url_for('index'))
     # For login page, generate and pass CSRF token if not using WTForms directly in template
     # However, login.html uses JS fetch, so token needs to be available to JS
     # One way is to render it in a meta tag or a script variable in login.html itself.
@@ -1245,147 +1365,189 @@ def index():
     """Serves the main dashboard page."""
     return render_template('mikrotik_userman_dashboard.html')
 
-@app.route('/api/initial-connect', methods=['POST'])
-# No @login_required here, as it's for the Mikrotik connection setup,
-# but it should only be callable after app login.
-# The before_request_handler already protects it if user is not authenticated.
-def initial_connect():
-    global app_config # Ensure we're updating the global app_config
+# --- Router Management API Endpoints ---
+
+@app.route('/api/routers', methods=['GET'])
+@login_required
+def get_routers_list():
+    """Returns a list of all configured routers, excluding sensitive details."""
+    routers = config_loader.get_all_routers(include_credentials=False)
+    active_router_id = config_loader.get_active_router_id()
+    return jsonify({'routers': routers, 'active_router_id': active_router_id})
+
+@app.route('/api/routers', methods=['POST'])
+@login_required
+def add_new_router():
+    """Adds a new router configuration."""
     data = request.json
-    errors = {}
+    # Basic validation (more can be added for host, port formats etc.)
+    if not data or 'name' not in data or not data['name']:
+        return jsonify({'success': False, 'message': _('Router name is required.')}), 400
+    if 'host' not in data or not data['host']:
+        return jsonify({'success': False, 'message': _('Router host is required.')}), 400
 
-    host = data.get('host')
-    port_str = data.get('port') # Port comes as string or number from JSON
-    username = data.get('username')
-    password = data.get('password') # Password can be empty, so no direct validation other than type if needed
-
-    if not host:
-        errors['host'] = _('Host IP address or hostname is required.')
-    elif len(host) > 255: # General length limit for hostnames/IPs
-        errors['host'] = _('Host is too long.')
-    # Basic regex for IP or hostname (can be improved for stricter validation)
-    # elif not re.match(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$|^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$", host):
-    #     errors['host'] = _('Invalid host format. Must be a valid IP address or hostname.')
-
-
-    port = None
-    if port_str is None: # Check if port is provided at all
-        errors['port'] = _('Port is required.')
+    # The router_config dict for add_router can include:
+    # name, host, port, username, password, use_ssl, hotspot_login_url
+    # ID will be generated by add_router.
+    success, message, new_router_id = config_loader.add_router(data)
+    if success:
+        global app_config # Reload app_config as it might have changed (e.g. active_router_id)
+        app_config = config_loader.get_config()
+        return jsonify({'success': True, 'message': message, 'router_id': new_router_id}), 201
     else:
-        try:
-            port = int(port_str)
-            if not (1 <= port <= 65535): # API ports are typically 1-65535
-                errors['port'] = _('Port must be a number between 1 and 65535.')
-        except ValueError:
-            errors['port'] = _('Port must be a valid number.')
+        return jsonify({'success': False, 'message': message}), 400
 
-    if not username:
-        errors['username'] = _('Username is required.')
-    elif len(username) > 64:
-         errors['username'] = _('Username must be 64 characters or less.')
+@app.route('/api/routers/<router_id>', methods=['PUT'])
+@login_required
+def update_existing_router(router_id: str):
+    """Updates an existing router's configuration."""
+    data = request.json
+    if not data:
+        return jsonify({'success': False, 'message': _('No data provided for update.')}), 400
 
-    # Password can be empty for some Mikrotik setups, so only length validation if not empty
-    if password and len(password) > 128: # Arbitrary reasonable max length
-        errors['password'] = _('Password must be 128 characters or less.')
+    # ID in payload is ignored by update_router, uses router_id from URL
+    success, message = config_loader.update_router(router_id, data)
+    if success:
+        global app_config
+        app_config = config_loader.get_config()
+        return jsonify({'success': True, 'message': message})
+    else:
+        return jsonify({'success': False, 'message': message}), 404 if "not found" in message.lower() else 400
 
+@app.route('/api/routers/<router_id>', methods=['DELETE'])
+@login_required
+def delete_existing_router(router_id: str):
+    """Deletes a router configuration."""
+    success, message = config_loader.delete_router(router_id)
+    if success:
+        global app_config
+        app_config = config_loader.get_config()
+        return jsonify({'success': True, 'message': message})
+    else:
+        return jsonify({'success': False, 'message': message}), 404 if "not found" in message.lower() else 400
 
-    if errors:
-        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+@app.route('/api/routers/set-active/<router_id>', methods=['POST'])
+@login_required
+def set_active_router(router_id: str):
+    """Sets the specified router as the active one."""
+    success, message = config_loader.set_active_router_id(router_id)
+    if success:
+        # Close any existing connection from 'g' as it might be for the old active router
+        if 'mikrotik_api' in g:
+            g.pop('mikrotik_api', None)
+        if 'mikrotik_connection' in g:
+            conn_to_close = g.pop('mikrotik_connection', None)
+            if conn_to_close and hasattr(conn_to_close, 'close'):
+                try:
+                    conn_to_close.close()
+                    logger.info("Closed previous active Mikrotik connection from 'g' after switching active router.")
+                except Exception as e:
+                    logger.error(f"Error closing previous connection from 'g': {e}")
 
-    # Proceed with connection attempt if validation passed
-    # Port is already an int here if validation passed
-    logger.info(f"Attempting initial connection to Mikrotik: {host}:{port} with user: {username}")
-    try:
-        # Attempt connection
-        temp_conn = librouteros.connect(
-            host=host,
-            username=username,
-            password=password,
-            port=port,
-            ssl=app_config['mikrotik'].get('use_ssl', False) # Use current SSL setting or default
-        )
-        temp_conn.close() # Close if successful, we just tested it.
-        logger.info("Initial connection test successful.")
+        global app_config
+        app_config = config_loader.get_config()
+        return jsonify({'success': True, 'message': message})
+    else:
+        return jsonify({'success': False, 'message': message}), 404 if "not found" in message.lower() else 400
 
-        # Update config.json
-        new_mikrotik_config = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password, # Save the password
-            "use_ssl": app_config['mikrotik'].get('use_ssl', False), # Preserve existing SSL setting
-            "hotspot_login_url": app_config['mikrotik'].get('hotspot_login_url', '') # Preserve existing
-        }
-        config_loader.update_config({'mikrotik': new_mikrotik_config})
-        app_config = config_loader.get_config() # Reload app_config to reflect changes
+# --- Modified Existing API Endpoints ---
 
-        return jsonify({'success': True, 'message': 'Successfully connected and configuration saved.'})
+@app.route('/api/initial-connect', methods=['POST'])
+# This POST endpoint is no longer suitable for multi-router setup.
+# It was designed to configure a single global Mikrotik instance.
+# For adding routers, use POST /api/routers.
+# This endpoint could be repurposed as a GET to check initial app status or similar,
+# but its POST functionality is removed.
+@login_required # Should still require login to attempt any action
+def initial_connect():
+    # The original POST functionality is removed.
+    # If this endpoint is still called with POST, it should indicate it's deprecated or invalid.
+    if request.method == 'POST':
+        logger.warning("POST to /api/initial-connect is deprecated. Use POST /api/routers to add a new router.")
+        return jsonify({
+            'success': False,
+            'message': _('This way of connecting is deprecated. Please use the new router management interface.')
+        }), 405 # Method Not Allowed or 410 Gone
 
-    except (librouteros.exceptions.LibRouterosError, TrapError, socket.error, ConnectionRefusedError, OSError) as e:
-        logger.error(f"Initial connection failed: {e}")
-        # Sanitize error message for user
-        error_message = str(e)
-        if "authentication failed" in error_message.lower():
-            return jsonify({'success': False, 'message': 'Authentication failed. Please check username and password.'}), 401
-        elif "connection refused" in error_message.lower() or "timed out" in error_message.lower() or "no route to host" in error_message.lower():
-            return jsonify({'success': False, 'message': 'Connection refused or timed out. Check IP address, port, and router firewall.'}), 400
-        return jsonify({'success': False, 'message': f'Connection failed: {e}.'}), 400
-    except Exception as e:
-        logger.error(f"Unexpected error during initial connection: {e}")
-        return jsonify({'success': False, 'message': f'An unexpected error occurred: {e}.'}), 500
+    # Example GET functionality (optional, can be removed if not needed)
+    # This could return status about whether any router is configured and active.
+    active_router_conf = config_loader.get_active_router_config()
+    if active_router_conf:
+        return jsonify({
+            'success': True,
+            'message': _('An active router is configured.'),
+            'active_router_name': active_router_conf.get('name')
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': _('No active router configured. Please add or select a router.')
+        })
 
 
 @app.route('/api/test-connection', methods=['POST'])
 @login_required
 def test_connection():
+    # This will test the currently active router via RouterOSService
     success, message = router_os_service.test_connection()
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/config', methods=['GET'])
 @login_required
 def get_config_route():
-    cfg = config_loader.get_config()
-    # Add status of optional features
-    cfg['features'] = {
-        'pdf_export': WEASYPRINT_AVAILABLE,
-        'qr_codes': QRCODE_AVAILABLE
-    }
-    # Add app_admin section but without password for security
-    app_admin_secure = cfg.get('app_admin', {}).copy()
-    app_admin_secure.pop('password_hash', None) # Remove password hash
-    cfg['app_admin_display'] = app_admin_secure
+    # cfg = config_loader.get_config() # This would get the raw full config
 
-    return jsonify(cfg)
+    # Construct a view of the config suitable for the frontend
+    # Exclude sensitive details like full router passwords from this general config view
+    server_settings = config_loader.config.get('server', {})
+    app_admin_settings = config_loader.config.get('app_admin', {}).copy()
+    app_admin_settings.pop('password_hash', None) # Remove hash for security
+
+    # Get routers list (without passwords) and active_router_id
+    routers_list_safe = config_loader.get_all_routers(include_credentials=False)
+    active_router_id = config_loader.get_active_router_id()
+
+    frontend_config = {
+        'server': server_settings,
+        'app_admin_display': app_admin_settings, # Renamed from app_admin to app_admin_display previously
+        'routers': routers_list_safe,
+        'active_router_id': active_router_id,
+        'features': {
+            'pdf_export': WEASYPRINT_AVAILABLE,
+            'qr_codes': QRCODE_AVAILABLE
+        }
+    }
+    return jsonify(frontend_config)
 
 @app.route('/api/config', methods=['POST'])
 @login_required
 def update_config_route():
     data = request.json
-    # Prevent app_admin password_hash from being updated directly via this generic route
-    # It should be handled by a dedicated password change route (not in scope for this subtask)
-    if 'app_admin' in data:
-        # If 'app_admin' is present, make sure it doesn't try to wipe/change password_hash
-        # Best is to pop it and instruct user to use a dedicated mechanism if they want to change app user details
-        data.pop('app_admin', None)
-        # Or, more carefully, preserve existing password if username is updated
-        # current_admin_config = config_loader.get_config().get('app_admin', {})
-        # if 'username' in data.get('app_admin', {}): # if new username is provided
-        #    data['app_admin']['password_hash'] = current_admin_config.get('password_hash')
 
-    # Filter out any attempt to update sensitive fields that should be managed by env vars or dedicated routes
-    if 'mikrotik' in data and 'password' in data['mikrotik'] and os.environ.get('MIKROTIK_PASSWORD'):
-        logger.warning("Attempt to update Mikrotik password via general config update while MIKROTIK_PASSWORD env var is set. Password update ignored.")
-        del data['mikrotik']['password']
-        if not data['mikrotik']: # if password was the only key
-            del data['mikrotik']
+    # This endpoint should now only handle general settings like 'server'.
+    # Router configurations are handled by /api/routers endpoints.
+    # App admin password changes are handled by /api/admin/change-password.
 
+    allowed_sections_to_update = {}
+    if 'server' in data:
+        allowed_sections_to_update['server'] = data['server']
 
-    config_loader.update_config(data)
-    # Reload app_config in case server settings like port/host were changed,
-    # though these typically require a server restart to take effect.
-    global app_config
+    # Potentially other general app settings if they exist directly under config root
+    # For example, if 'features' were configurable:
+    # if 'features' in data:
+    #     allowed_sections_to_update['features'] = data['features']
+
+    if not allowed_sections_to_update:
+        return jsonify({'success': False, 'message': _('No valid configuration sections provided for update.')}), 400
+
+    config_loader.update_config(allowed_sections_to_update) # update_config now only handles non-router parts
+
+    global app_config # Reload global app_config
     app_config = config_loader.get_config()
-    return jsonify({'success': True, 'message': _('Configuration updated and saved. Some changes may require a server restart.')})
+
+    # Note: Changes to server host/port might require a server restart, message should reflect this.
+    return jsonify({'success': True, 'message': _('General configuration updated. Some changes may require a server restart.')})
+
 
 @app.route('/api/admin/change-password', methods=['POST'])
 @login_required

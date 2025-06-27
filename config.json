@@ -1,12 +1,17 @@
 {
-    "mikrotik": {
-        "host": "192.168.88.1",
-        "port": 8728,
-        "username": "admin",
-        "password": "",
-        "use_ssl": false,
-        "hotspot_login_url": "http://hotspot.setup/login"
-    },
+    "routers": [
+        {
+            "id": "default-router",
+            "name": "Main Office Router",
+            "host": "192.168.88.1",
+            "port": 8728,
+            "username": "admin",
+            "password": "",
+            "use_ssl": false,
+            "hotspot_login_url": "http://hotspot.setup/login"
+        }
+    ],
+    "active_router_id": "default-router",
     "server": {
         "host": "0.0.0.0",
         "port": 5000,

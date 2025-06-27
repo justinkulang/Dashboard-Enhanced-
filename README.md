@@ -1,28 +1,29 @@
 # Mikrotik Hotspot User Management Dashboard
 
-This project provides a web-based dashboard for managing Mikrotik Hotspot users, including features for user creation, batch generation, profile management, and activity monitoring. It incorporates security best practices like session management, CSRF protection, and guidance for production deployment.
+This project provides a web-based dashboard for managing users on one or more Mikrotik Hotspot routers. It includes features for user creation, batch generation, profile management, activity monitoring, and more, all from a single interface. It incorporates security best practices like session management, CSRF protection, and guidance for production deployment.
 
 ## Features
 
-*   **User Management:** Create, edit, delete, and view hotspot users.
-*   **Batch User Creation:** Generate multiple voucher-style users at once.
-*   **Profile Management:** Manage hotspot user profiles from the Mikrotik router.
-*   **Active Sessions:** View and disconnect active hotspot users.
+*   **Multi-Router Support:** Manage multiple Mikrotik devices from one dashboard.
+*   **User Management:** Create, edit, delete, and view hotspot users on the active router.
+*   **Batch User Creation:** Generate multiple voucher-style users at once on the active router.
+*   **Profile Management:** Manage hotspot user profiles from the active Mikrotik router.
+*   **Active Sessions:** View and disconnect active hotspot users on the active router.
 *   **Voucher Generation:** Export user batches as printable HTML or PDF vouchers with QR codes.
-*   **Analytics:** Basic analytics on data usage by profile and top users.
+*   **Analytics:** Basic analytics on data usage by profile and top users for the active router.
 *   **Secure Access:**
     *   Web application login system using Flask-Login (session-based).
     *   CSRF protection for all state-changing operations using Flask-WTF.
 *   **Internationalization (i18n):** Support for multiple languages (English, Arabic, French).
-*   **Configurable:** Key settings managed via `config.json`.
+*   **Configurable:** Key settings, including router configurations, managed via `config.json` and the application UI.
 *   **Production Ready:** Includes Gunicorn configuration and guidance for HTTPS setup.
 
 ## Prerequisites
 
 *   Python 3.7+
 *   pip (Python package installer)
-*   A Mikrotik router with the API service enabled.
-*   Network connectivity between the server running this application and the Mikrotik router.
+*   One or more Mikrotik routers with the API service enabled.
+*   Network connectivity between the server running this application and your Mikrotik router(s).
 *   (Optional, for PDF export) System dependencies for WeasyPrint (see WeasyPrint documentation for your OS).
 
 ## Setup and Installation
@@ -58,11 +59,34 @@ This project provides a web-based dashboard for managing Mikrotik Hotspot users,
             print(new_hash)
             ```
             Then, update the `password_hash` value in the `app_admin` section of `config.json` with this new hash.
-    *   **Mikrotik Connection:**
-        *   Configure your Mikrotik router details (host, API username, API password, port) either by:
-            1.  Manually editing `config.json` before the first run.
-            2.  Using the web application's "Settings" page after logging in with the default admin credentials. The application will not be able to manage the router until these details are correctly configured.
+    *   **Router Configuration:**
+        *   The application now supports managing multiple Mikrotik routers.
+        *   Upon first run, `config.json` is created with a placeholder for a default router.
+        *   Router configurations (including adding new routers, editing existing ones, and selecting the active router for operations) are managed through the **"Routers" tab** in the web application's interface after logging in.
+        *   The `config.json` file will store an array of router configurations under the `routers` key and an `active_router_id` key indicating the currently selected router.
+        *   Example structure for a router entry within the `routers` array:
+            ```json
+            {
+              "id": "unique-router-id", // Automatically generated
+              "name": "My Office Router",
+              "host": "192.168.88.1",
+              "port": 8728,
+              "username": "admin_api_user",
+              "password": "api_password",
+              "use_ssl": false,
+              "hotspot_login_url": "http://hotspot.example.com/login"
+            }
+            ```
     *   **Log File Location:** The default log file is `mikrotik_dashboard.log`. You can change this in `config.json` under `server.log_file`.
+
+## Managing Routers
+
+Once logged into the web application, you will typically find options to:
+*   **List configured routers.**
+*   **Add a new router:** Provide a name, host IP/domain, API port, API username, and password.
+*   **Edit an existing router's details.**
+*   **Delete a router configuration.**
+*   **Set a router as active:** Operations like viewing users, profiles, active sessions, or creating new users/vouchers will apply to the currently active router.
 
 ## Running the Application
 
@@ -106,13 +130,10 @@ For enhanced security and flexibility, especially in production, it's **highly r
         *   Generate this hash using the provided `passwordg_generator.py` script or by running `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your_password'))"`.
         *   Example: `export APP_ADMIN_PASSWORD_HASH='your_generated_werkzeug_hash'`
         *   **Note:** If `APP_ADMIN_PASSWORD_HASH` is set as an environment variable, the in-app password change feature will be disabled for the admin user. Password changes must then be made by updating this environment variable and restarting the application. If this environment variable is not set, the password hash is managed via `config.json`, and the in-app password change feature (accessible in the Settings tab) can be used.
-*   **Mikrotik API Credentials:**
-    *   `MIKROTIK_HOST`: IP address or hostname of your Mikrotik router.
-    *   `MIKROTIK_PORT`: API port (default `8728`, or `8729` for SSL).
-    *   `MIKROTIK_USERNAME`: Mikrotik API username.
-    *   `MIKROTIK_PASSWORD`: Mikrotik API password.
-    *   `MIKROTIK_USE_SSL`: Set to `true` or `false` to enable/disable SSL for the API connection.
-    *   `MIKROTIK_HOTSPOT_LOGIN_URL`: The login URL for your hotspot (used for QR codes on vouchers). Example: `http://hotspot.example.com/login`
+*   **Router Configuration via Environment Variables:**
+    *   With the introduction of multi-router support, managing individual router connection details (like host, port, username, password) via environment variables becomes more complex (e.g., requiring prefixed variables like `ROUTER_0_HOST`, `ROUTER_1_HOST`).
+    *   Currently, the application prioritizes router configurations stored in `config.json` (managed via the UI). The global `MIKROTIK_HOST`, `MIKROTIK_PASSWORD`, etc., environment variables are **no longer the primary way** to configure router connections for multi-router setups.
+    *   It's recommended to manage router connection details through the application's web interface or by directly editing the `routers` array in the `config.json` file.
 *   **Server Settings (Optional Overrides):**
     *   `SERVER_HOST`: Host for the web application to bind to (e.g., `0.0.0.0` or `127.0.0.1`).
     *   `SERVER_PORT`: Port for the web application.
