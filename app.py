@@ -111,13 +111,16 @@ class ConfigLoader:
         self.config = self._load_config()
 
     def _load_config(self):
-        """Load configuration from config.json or create default if not exists."""
-        default_config = {
+        """Load configuration from config.json or create default if not exists.
+        Environment variables take precedence over config.json values for sensitive data."""
+
+        # Define default structure (especially for non-sensitive parts or fallbacks)
+        cfg = {
             "mikrotik": {
                 "host": "192.168.88.1",
                 "port": 8728,
                 "username": "admin",
-                "password": "",
+                "password": "",  # Sensitive, prioritize ENV
                 "use_ssl": False,
                 "hotspot_login_url": "http://hotspot.setup/login"
             },
@@ -125,48 +128,164 @@ class ConfigLoader:
                 "host": "0.0.0.0",
                 "port": 5000,
                 "debug": False,
-                "log_file": "mikrotik_dashboard.log", 
-                "log_level_console": "INFO", 
-                "log_level_file": "INFO"     
+                "log_file": "mikrotik_dashboard.log",
+                "log_level_console": "INFO",
+                "log_level_file": "INFO"
             },
             "app_admin": {
-                "username": "admin",
-                "password_hash": "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9" # Default for "changeme"
+                "username": "admin", # Sensitive, prioritize ENV
+                "password_hash": "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9"  # Sensitive, prioritize ENV
             }
         }
 
+        # Load from config.json if it exists
+        json_config = {}
         if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                loaded_config = json.load(f)
-                # Deep merge with default to ensure new keys are present
-                # For mikrotik and server, update the default_config's sections with loaded values
-                default_config['mikrotik'].update(loaded_config.get('mikrotik', {}))
-                default_config['server'].update(loaded_config.get('server', {}))
-                
-                # For app_admin, ensure it exists in default_config then update it
-                # This handles cases where app_admin might not be in an old config file
-                if 'app_admin' not in default_config: # Should not happen given the new default_config structure
-                    default_config['app_admin'] = {}
-                default_config['app_admin'].update(loaded_config.get('app_admin', {}))
-                
-                return default_config
+            try:
+                with open(self.config_file, 'r') as f:
+                    json_config = json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"Error decoding JSON from {self.config_file}. Using defaults and environment variables.", exc_info=True)
         else:
-            # If config file doesn't exist, write the full default_config (including new app_admin)
-            with open(self.config_file, 'w') as f:
-                json.dump(default_config, f, indent=4)
-            return default_config
+            # If config file doesn't exist, write the default structure (values might be overridden by ENV)
+            try:
+                with open(self.config_file, 'w') as f:
+                    json.dump(cfg, f, indent=4) # Write the initial default structure
+                logger.info(f"Default configuration file created at {self.config_file}")
+            except IOError:
+                logger.error(f"Could not write default config file to {self.config_file}", exc_info=True)
+
+
+        # Merge json_config into cfg (json_config takes precedence over hardcoded defaults here)
+        if json_config.get('mikrotik'):
+            cfg['mikrotik'].update(json_config['mikrotik'])
+        if json_config.get('server'):
+            cfg['server'].update(json_config['server'])
+        if json_config.get('app_admin'):
+            cfg['app_admin'].update(json_config['app_admin'])
+
+        # Environment variable overrides for Mikrotik
+        cfg['mikrotik']['host'] = os.environ.get('MIKROTIK_HOST', cfg['mikrotik']['host'])
+        cfg['mikrotik']['port'] = int(os.environ.get('MIKROTIK_PORT', cfg['mikrotik']['port']))
+        cfg['mikrotik']['username'] = os.environ.get('MIKROTIK_USERNAME', cfg['mikrotik']['username'])
+        mikrotik_password_env = os.environ.get('MIKROTIK_PASSWORD')
+        if mikrotik_password_env is not None:
+            cfg['mikrotik']['password'] = mikrotik_password_env
+            logger.info("Mikrotik password loaded from MIKROTIK_PASSWORD environment variable.")
+        elif not cfg['server'].get('debug') and cfg['mikrotik']['password']:
+             logger.warning("MIKROTIK_PASSWORD environment variable not set. Loading Mikrotik password from config.json. This is not recommended for production.")
+
+
+        mikrotik_use_ssl_env = os.environ.get('MIKROTIK_USE_SSL')
+        if mikrotik_use_ssl_env is not None:
+            cfg['mikrotik']['use_ssl'] = mikrotik_use_ssl_env.lower() in ['true', '1', 'yes']
+        cfg['mikrotik']['hotspot_login_url'] = os.environ.get('MIKROTIK_HOTSPOT_LOGIN_URL', cfg['mikrotik']['hotspot_login_url'])
+
+        # Environment variable overrides for App Admin
+        cfg['app_admin']['username'] = os.environ.get('APP_ADMIN_USERNAME', cfg['app_admin']['username'])
+        app_admin_password_hash_env = os.environ.get('APP_ADMIN_PASSWORD_HASH')
+        if app_admin_password_hash_env:
+            cfg['app_admin']['password_hash'] = app_admin_password_hash_env
+            logger.info("App admin password hash loaded from APP_ADMIN_PASSWORD_HASH environment variable.")
+        elif not cfg['server'].get('debug') and cfg['app_admin']['password_hash']:
+            logger.warning("APP_ADMIN_PASSWORD_HASH environment variable not set. Loading app admin password hash from config.json. This is not recommended for production.")
+
+        # Environment variable overrides for Server (optional, less critical but good for flexibility)
+        cfg['server']['host'] = os.environ.get('SERVER_HOST', cfg['server']['host'])
+        cfg['server']['port'] = int(os.environ.get('SERVER_PORT', cfg['server']['port']))
+        server_debug_env = os.environ.get('FLASK_DEBUG') # Common env var for Flask debug
+        if server_debug_env is not None:
+             cfg['server']['debug'] = server_debug_env.lower() in ['true', '1', 'yes']
+        elif os.environ.get('APP_ENV', 'development').lower() == 'production': # Another common pattern
+            cfg['server']['debug'] = False
+
+
+        # Log which source was used for sensitive data if debug is false
+        if not cfg['server'].get('debug'):
+            if mikrotik_password_env:
+                logger.info("Using Mikrotik password from environment variable.")
+            elif cfg['mikrotik']['password']: # Only log if a password was actually found in config
+                logger.warning("SECURITY WARNING: Using Mikrotik password from config.json. Set MIKROTIK_PASSWORD environment variable for production.")
+
+            if app_admin_password_hash_env:
+                logger.info("Using App Admin password hash from environment variable.")
+            elif cfg['app_admin']['password_hash'] != "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9": # Default for "changeme"
+                 logger.warning("SECURITY WARNING: Using App Admin password hash from config.json. Set APP_ADMIN_PASSWORD_HASH environment variable for production.")
+
+        # Debug log for server host/port/debug status
+        logger.info(f"Server configured to run on {cfg['server']['host']}:{cfg['server']['port']} with debug mode: {cfg['server']['debug']}")
+
+        return cfg
 
     def get_config(self):
         return self.config
 
-    def update_config(self, new_config):
-        self.config['mikrotik'].update(new_config.get('mikrotik', {}))
-        self.config['server'].update(new_config.get('server', {}))
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f, indent=4)
+    def update_config(self, new_config_data):
+        """Updates specified parts of the configuration and saves to config.json.
+        Does NOT update values that are primarily sourced from environment variables
+        (like passwords, admin username/hash if they were set by env vars).
+        This method is mainly for settings like Mikrotik host/port (if not set by env),
+        server settings, or hotspot_login_url.
+        """
+        changes_made = False
+
+        # Update Mikrotik settings (excluding password if it was from ENV)
+        if 'mikrotik' in new_config_data:
+            mk_changes = new_config_data['mikrotik']
+            # Only update if not overridden by ENV. This logic gets complex.
+            # Simpler: allow update, but ENV will override on next load.
+            # Or, prevent updating fields managed by ENV.
+            # For now, let's allow updates to config.json, ENV will always win on load.
+            self.config['mikrotik'].update(mk_changes)
+            changes_made = True
+            # Specific check: do not overwrite password in config if it came from ENV
+            if os.environ.get('MIKROTIK_PASSWORD') and 'password' in mk_changes:
+                 logger.warning("Attempted to update Mikrotik password in config.json while MIKROTIK_PASSWORD env var is set. Config.json change will be ignored on next load if env var persists.")
+
+
+        if 'server' in new_config_data:
+            self.config['server'].update(new_config_data['server'])
+            changes_made = True
+
+        # App admin username/hash updates should go through a dedicated mechanism, not this generic update.
+        # However, if other app_admin settings were to exist, they could be updated here.
+        # For now, we prevent app_admin changes through this generic route.
+        if 'app_admin' in new_config_data:
+            logger.warning("Attempt to update 'app_admin' through generic config update. This is generally not allowed for password hash. No changes made to app_admin section via this method.")
+            # self.config['app_admin'].update(new_config_data.get('app_admin', {})) # Example if we wanted to allow some app_admin changes
+
+        if changes_made:
+            try:
+                with open(self.config_file, 'w') as f:
+                    json.dump(self.config, f, indent=4)
+                logger.info(f"Configuration updated in {self.config_file}")
+            except IOError:
+                logger.error(f"Could not write configuration to {self.config_file}", exc_info=True)
+        else:
+            logger.info("No changes applied to configuration file via update_config.")
+
+
+    def update_admin_password_hash(self, new_password_hash: str) -> bool:
+        """Specifically updates the app_admin password_hash in config.json.
+        Returns True if successful, False otherwise.
+        This should only be called if the hash is NOT being sourced from an ENV var."""
+        if os.environ.get('APP_ADMIN_PASSWORD_HASH'):
+            logger.error("Cannot update admin password hash in config.json because APP_ADMIN_PASSWORD_HASH environment variable is set.")
+            return False
+
+        self.config['app_admin']['password_hash'] = new_password_hash
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            logger.info(f"Admin password hash updated in {self.config_file}")
+            return True
+        except IOError:
+            logger.error(f"Could not write admin password hash to {self.config_file}", exc_info=True)
+            return False
 
     def reset_mikrotik_config_to_defaults(self):
-        """Resets the Mikrotik part of the configuration to its original defaults."""
+        """Resets the Mikrotik part of the configuration to its original defaults,
+        respecting that environment variables will still take precedence on next load."""
         # Get the original default settings as defined in _load_config
         # This is a bit indirect; _load_config itself returns a merged config.
         # For true defaults, we define it here or access a pristine default structure.
@@ -1133,21 +1252,48 @@ def index():
 def initial_connect():
     global app_config # Ensure we're updating the global app_config
     data = request.json
+    errors = {}
+
     host = data.get('host')
-    port = data.get('port')
+    port_str = data.get('port') # Port comes as string or number from JSON
     username = data.get('username')
-    password = data.get('password') # Password can be empty
+    password = data.get('password') # Password can be empty, so no direct validation other than type if needed
 
-    if not all([host, port is not None, username is not None]): # port can be 0, username can be empty string
-        return jsonify({'success': False, 'message': 'Host, Port, and Username are required.'}), 400
+    if not host:
+        errors['host'] = _('Host IP address or hostname is required.')
+    elif len(host) > 255: # General length limit for hostnames/IPs
+        errors['host'] = _('Host is too long.')
+    # Basic regex for IP or hostname (can be improved for stricter validation)
+    # elif not re.match(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$|^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$", host):
+    #     errors['host'] = _('Invalid host format. Must be a valid IP address or hostname.')
 
-    try:
-        port = int(port)
-        if not (0 <= port <= 65535): # Port 0 is technically valid for OS to pick one
-            raise ValueError("Invalid port number")
-    except ValueError:
-        return jsonify({'success': False, 'message': 'Invalid port number. Must be between 0 and 65535.'}), 400
 
+    port = None
+    if port_str is None: # Check if port is provided at all
+        errors['port'] = _('Port is required.')
+    else:
+        try:
+            port = int(port_str)
+            if not (1 <= port <= 65535): # API ports are typically 1-65535
+                errors['port'] = _('Port must be a number between 1 and 65535.')
+        except ValueError:
+            errors['port'] = _('Port must be a valid number.')
+
+    if not username:
+        errors['username'] = _('Username is required.')
+    elif len(username) > 64:
+         errors['username'] = _('Username must be 64 characters or less.')
+
+    # Password can be empty for some Mikrotik setups, so only length validation if not empty
+    if password and len(password) > 128: # Arbitrary reasonable max length
+        errors['password'] = _('Password must be 128 characters or less.')
+
+
+    if errors:
+        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+
+    # Proceed with connection attempt if validation passed
+    # Port is already an int here if validation passed
     logger.info(f"Attempting initial connection to Mikrotik: {host}:{port} with user: {username}")
     try:
         # Attempt connection
@@ -1226,9 +1372,76 @@ def update_config_route():
         # if 'username' in data.get('app_admin', {}): # if new username is provided
         #    data['app_admin']['password_hash'] = current_admin_config.get('password_hash')
 
+    # Filter out any attempt to update sensitive fields that should be managed by env vars or dedicated routes
+    if 'mikrotik' in data and 'password' in data['mikrotik'] and os.environ.get('MIKROTIK_PASSWORD'):
+        logger.warning("Attempt to update Mikrotik password via general config update while MIKROTIK_PASSWORD env var is set. Password update ignored.")
+        del data['mikrotik']['password']
+        if not data['mikrotik']: # if password was the only key
+            del data['mikrotik']
+
 
     config_loader.update_config(data)
-    return jsonify({'success': True, 'message': 'Configuration updated and saved.'})
+    # Reload app_config in case server settings like port/host were changed,
+    # though these typically require a server restart to take effect.
+    global app_config
+    app_config = config_loader.get_config()
+    return jsonify({'success': True, 'message': _('Configuration updated and saved. Some changes may require a server restart.')})
+
+@app.route('/api/admin/change-password', methods=['POST'])
+@login_required
+def change_admin_password():
+    global app_config
+    data = request.json
+    current_password = data.get('current_password')
+    new_password = data.get('new_password')
+    confirm_new_password = data.get('confirm_new_password')
+
+    if not all([current_password, new_password, confirm_new_password]):
+        return jsonify({'success': False, 'message': _('All password fields are required.')}), 400
+
+    if new_password != confirm_new_password:
+        return jsonify({'success': False, 'message': _('New passwords do not match.')}), 400
+
+    # Basic password policy (example: min 8 chars)
+    if len(new_password) < 8:
+        return jsonify({'success': False, 'message': _('New password must be at least 8 characters long.')}), 400
+    # Add more complexity checks if desired (e.g., uppercase, lowercase, number, symbol)
+    # For example:
+    # if not re.search(r"[A-Z]", new_password) or \
+    #    not re.search(r"[a-z]", new_password) or \
+    #    not re.search(r"\d", new_password) or \
+    #    not re.search(r"[!@#$%^&*(),.?\":{}|<>]", new_password):
+    #     return jsonify({'success': False, 'message': _('New password must include uppercase, lowercase, number, and symbol.')}), 400
+
+
+    admin_username = app_config.get('app_admin', {}).get('username')
+    current_hash = app_config.get('app_admin', {}).get('password_hash')
+
+    if not current_user.is_authenticated or current_user.get_id() != admin_username:
+        # Should not happen if @login_required works correctly and only one admin user
+        return jsonify({'success': False, 'message': _('Unauthorized.')}), 401
+
+    if not check_password_hash(current_hash, current_password):
+        return jsonify({'success': False, 'message': _('Incorrect current password.')}), 400
+
+    # Check if password hash is managed by environment variable
+    if os.environ.get('APP_ADMIN_PASSWORD_HASH'):
+        logger.warning(f"Admin user '{admin_username}' attempted to change password via UI, but password hash is managed by APP_ADMIN_PASSWORD_HASH environment variable.")
+        return jsonify({
+            'success': False,
+            'message': _('Password change via UI is disabled because the admin password is managed by an environment variable. Please update the environment variable and restart the application.')
+        }), 403 # Forbidden
+
+    new_hash = generate_password_hash(new_password)
+    if config_loader.update_admin_password_hash(new_hash):
+        app_config = config_loader.get_config() # Reload config
+        logger.info(f"Admin user '{admin_username}' password changed successfully via UI.")
+        # Optionally, force logout other sessions for this user if that becomes relevant
+        return jsonify({'success': True, 'message': _('Admin password updated successfully.')})
+    else:
+        logger.error(f"Failed to save new admin password hash to config file for user '{admin_username}'.")
+        return jsonify({'success': False, 'message': _('Failed to update password. Check server logs.')}), 500
+
 
 @app.route('/api/dashboard-stats', methods=['GET'])
 @login_required
@@ -1249,36 +1462,107 @@ def get_users():
 @login_required
 def create_user():
     data = request.json
+
+    # --- Input Validation for Create User ---
+    errors = {}
     username = data.get('name')
     password = data.get('password')
-    if not username or not password:
-        return jsonify({'success': False, 'message': _('Username and password are required.')}), 400
+    profile = data.get('profile') # Profile is also crucial
+
+    if not username:
+        errors['name'] = _('Username is required.')
+    elif not (3 <= len(username) <= 64): # Example length constraints
+        errors['name'] = _('Username must be between 3 and 64 characters.')
+    # Add regex for allowed characters in username if necessary, e.g.,
+    # elif not re.match(r"^[a-zA-Z0-9_-]+$", username):
+    #     errors['name'] = _('Username can only contain letters, numbers, underscore, and hyphen.')
+
+
+    if not password:
+        errors['password'] = _('Password is required.')
+    elif not (6 <= len(password) <= 64): # Example length constraints
+        errors['password'] = _('Password must be between 6 and 64 characters.')
+
+    if not profile: # Assuming profile name is sent and is required
+        errors['profile'] = _('Profile is required.')
     
-    success, message = router_os_service.create_hotspot_user(data)
-    return jsonify({'success': success, 'message': message}) # Assuming router_os_service returns translated messages or they are generic
+    # Optional fields validation (example for comment)
+    comment = data.get('comment')
+    if comment and len(comment) > 128: # Max length for comment
+        errors['comment'] = _('Comment cannot exceed 128 characters.')
+
+    # Validate time limit format (basic example, can be more complex)
+    limit_uptime = data.get('limit-uptime')
+    if limit_uptime and not re.match(r"^((\d+[wdhms])+)?$", limit_uptime):
+        errors['limit-uptime'] = _('Invalid time limit format. Use units like 1d, 2h30m, etc.')
+
+    # Validate data limit (must be a number if provided)
+    limit_bytes_total_mb = data.get('limit-bytes-total') # Assuming this is still passed as MB string from UI
+    if limit_bytes_total_mb:
+        try:
+            # The field name in API is 'limit-bytes-total' for the RouterOSService,
+            # but the form in HTML passes 'dataLimit' which is then converted.
+            # Assuming 'data' here contains 'limit-bytes-total' after potential conversion.
+            # If it's passed as 'dataLimit' (MB string) from JS, it's converted before user_data.
+            # Let's assume `data` here is the raw JSON from request.
+            # The actual conversion to bytes happens later in the original code.
+            # For validation, we check if it's a number.
+            # The `create_hotspot_user` expects `limit-bytes-total` as integer bytes or null.
+            # The original UI sends `dataLimit` as MB.
+            # This part of validation might need adjustment based on how `data` is structured for this route.
+            # For now, let's assume `data.get('limit-bytes-total')` is the numeric value in MB from UI.
+            # The transformation to bytes (value * 1024 * 1024) is done before calling router_os_service.
+            # So, data['limit-bytes-total'] in the payload to router_os_service will be bytes.
+            # Let's validate the 'dataLimit' field if it's coming directly from UI as 'dataLimit' in MB.
+            # Assuming the 'data' dict for this route uses 'name', 'password', 'profile', 'limit-uptime', 'dataLimit', 'comment'
+            # And then it's transformed before calling `create_hotspot_user`.
+            # The current `createUserForm` in HTML uses `id="dataLimit"`.
+            # Let's adjust the payload construction:
+
+            # The existing code for createUser route is:
+            # payload = { name: ..., password: ..., profile: ..., 'limit-uptime': ...,
+            #             'limit-bytes-total': data.get('dataLimit') ? parseInt(data.get('dataLimit')) * 1024 * 1024 : null, ... }
+            # So the `data` here is the direct JSON from the request.
+            # We should validate `data.get('dataLimit')`
+            data_limit_mb_str = data.get('dataLimit') # This comes from the form with id="dataLimit"
+            if data_limit_mb_str: # If it's provided
+                if not data_limit_mb_str.isdigit() or int(data_limit_mb_str) < 0:
+                    errors['dataLimit'] = _('Data limit must be a non-negative number (MB).')
+        except ValueError: # Should be caught by isdigit
+             errors['dataLimit'] = _('Invalid data limit. Must be a number (MB).')
+
+
+    if errors:
+        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+    # --- End Input Validation ---
+
+    # Prepare payload for RouterOSService (as it was originally structured)
+    # This transformation should ideally happen AFTER validation of raw inputs
+    payload_for_service = {
+        'name': username,
+        'password': password,
+        'profile': profile,
+        'comment': comment,
+        'limit-uptime': limit_uptime if limit_uptime else None, # Send None if empty for router
+        'limit-bytes-total': int(data.get('dataLimit')) * 1024 * 1024 if data.get('dataLimit') and data.get('dataLimit').isdigit() else None
+    }
+    # Remove None values before sending to service, as original code did for create_hotspot_user
+    payload_for_service = {k: v for k, v in payload_for_service.items() if v is not None}
+
+
+    success, message = router_os_service.create_hotspot_user(payload_for_service)
+    return jsonify({'success': success, 'message': message})
 
 @app.route('/api/bulk-create-users', methods=['POST'])
 @login_required
 def bulk_create_users():
     data = request.json
-    number_of_users = data.get('number_of_users')
-    profile = data.get('profile')
-    username_length = int(data.get('username_length', 6))
-    password_length = int(data.get('password_length', 8))
+    errors = {}
 
-    username_prefix = data.get('username_prefix', '')
-    username_charset_key = data.get('username_charset', 'alphanumeric')
-    password_charset_key = data.get('password_charset', 'alphanumeric_symbols')
-    comment_for_batch = data.get('comment_prefix', '')
-
-    if not all([number_of_users, profile]):
-        return jsonify({'success': False, 'message': _('Number of users and profile are required.')}), 400
-    if int(number_of_users) <= 0:
-        return jsonify({'success': False, 'message': _('Number of users must be positive.')}), 400
-
-    # Define character sets
+    # --- Input Validation for Bulk Create Users ---
+    # Define character sets early for validation
     safe_symbols = '!@#$%^&*-=+'
-    charsets = {
+    VALID_CHARSETS = {
         'alphanumeric': string.ascii_letters + string.digits,
         'alphanumeric_upper': string.ascii_uppercase + string.digits,
         'alphanumeric_lower': string.ascii_lowercase + string.digits,
@@ -1287,11 +1571,79 @@ def bulk_create_users():
         'alpha_lower': string.ascii_lowercase,
         'alphanumeric_symbols': string.ascii_letters + string.digits + safe_symbols
     }
-    username_chars = charsets.get(username_charset_key, charsets['alphanumeric'])
-    password_chars = charsets.get(password_charset_key, charsets['alphanumeric_symbols'])
 
-    base_user_data_keys = ['profile', 'limit-uptime', 'limit-bytes-total', 'server']
-    base_user_data = {k: data[k] for k in base_user_data_keys if k in data and data[k]}
+    try:
+        number_of_users = int(data.get('number_of_users', 0))
+        if not (1 <= number_of_users <= 1000): # Example: Max 1000 users at a time
+            errors['number_of_users'] = _('Number of users must be between 1 and 1000.')
+    except (ValueError, TypeError):
+        errors['number_of_users'] = _('Number of users must be a valid integer.')
+
+    profile = data.get('profile')
+    if not profile:
+        errors['profile'] = _('Profile is required.')
+    elif len(profile) > 64:
+        errors['profile'] = _('Profile name cannot exceed 64 characters.')
+
+    try:
+        username_length = int(data.get('username_length', 6))
+        if not (3 <= username_length <= 16):
+            errors['username_length'] = _('Username length must be between 3 and 16.')
+    except (ValueError, TypeError):
+        errors['username_length'] = _('Username length must be a valid integer.')
+
+    try:
+        password_length = int(data.get('password_length', 8))
+        if not (6 <= password_length <= 16):
+            errors['password_length'] = _('Password length must be between 6 and 16.')
+    except (ValueError, TypeError):
+        errors['password_length'] = _('Password length must be a valid integer.')
+
+    username_prefix = data.get('username_prefix', '')
+    if len(username_prefix) > 16:
+        errors['username_prefix'] = _('Username prefix cannot exceed 16 characters.')
+
+    username_charset_key = data.get('username_charset', 'alphanumeric')
+    if username_charset_key not in VALID_CHARSETS:
+        errors['username_charset'] = _('Invalid username character set selected.')
+
+    password_charset_key = data.get('password_charset', 'alphanumeric_symbols')
+    if password_charset_key not in VALID_CHARSETS:
+        errors['password_charset'] = _('Invalid password character set selected.')
+
+    comment_for_batch = data.get('comment_prefix', '') # This is the batch name/comment
+    if len(comment_for_batch) > 128:
+        errors['comment_prefix'] = _('Batch name/comment cannot exceed 128 characters.')
+
+    limit_uptime = data.get('limit-uptime') # Optional
+    if limit_uptime and not re.match(r"^((\d+[wdhms])+)?$", limit_uptime):
+        errors['limit-uptime'] = _('Invalid time limit format. Use units like 1d, 2h30m, etc.')
+
+    # Key from UI is 'bulkDataLimit' for this form
+    bulk_data_limit_mb_str = data.get('bulkDataLimit') # Optional, in MB
+    limit_bytes_total_for_service = None
+    if bulk_data_limit_mb_str: # If provided
+        if not bulk_data_limit_mb_str.isdigit() or int(bulk_data_limit_mb_str) < 0:
+            errors['bulkDataLimit'] = _('Bulk data limit must be a non-negative number (MB).')
+        else:
+            limit_bytes_total_for_service = int(bulk_data_limit_mb_str) * 1024 * 1024
+
+    if errors:
+        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+    # --- End Input Validation ---
+
+    username_chars = VALID_CHARSETS.get(username_charset_key) # Already validated
+    password_chars = VALID_CHARSETS.get(password_charset_key) # Already validated
+
+    # Prepare base data for each user, similar to original logic but using validated/processed inputs
+    base_user_data = {'profile': profile}
+    if limit_uptime:
+        base_user_data['limit-uptime'] = limit_uptime
+    if limit_bytes_total_for_service is not None: # Can be 0
+        base_user_data['limit-bytes-total'] = limit_bytes_total_for_service
+    # 'server' was in original base_user_data_keys, but not used for user creation attributes. Removed.
+    # if data.get('server'): # This field is not typically part of user creation data.
+    #     base_user_data['server'] = data.get('server')
 
 
     created_credentials = []
@@ -1331,11 +1683,79 @@ def bulk_create_users():
 @app.route('/api/users/<username>', methods=['PUT'])
 @login_required
 def edit_user(username: str):
-    data = request.json
-    if 'disabled' in data:
-        data['disabled'] = 'true' if data['disabled'] else 'false'
+    raw_data = request.json
+    errors = {}
 
-    success, message = router_os_service.edit_hotspot_user(username, data)
+    # --- Input Validation for Edit User ---
+    # For editing, all fields are optional in the request, but if provided, they must be valid.
+
+    new_password = raw_data.get('password')
+    if new_password is not None: # Only validate if password is being changed
+        if not (6 <= len(new_password) <= 64):
+            errors['password'] = _('New password must be between 6 and 64 characters.')
+
+    profile = raw_data.get('profile')
+    if profile is not None and not profile: # If key is present but value is empty string
+        errors['profile'] = _('Profile cannot be empty if provided.')
+    elif profile is not None and len(profile) > 64: # Max length for profile name
+        errors['profile'] = _('Profile name cannot exceed 64 characters.')
+
+    limit_uptime = raw_data.get('limit-uptime')
+    if limit_uptime is not None and limit_uptime != "" and not re.match(r"^((\d+[wdhms])+)?$", limit_uptime):
+        errors['limit-uptime'] = _('Invalid time limit format. Use units like 1d, 2h30m, etc., or leave blank for no change/unlimited based on profile.')
+
+    # dataLimit comes from UI as MB string, needs to be converted to bytes for limit-bytes-total
+    # The key in raw_data from the UI form (editUserModal) is 'editDataLimit' for the numeric input.
+    # The service expects 'limit-bytes-total'.
+    data_limit_mb_str = raw_data.get('dataLimit') # Assuming UI sends 'dataLimit'
+
+    limit_bytes_total_for_service = None # Initialize
+    if data_limit_mb_str is not None: # If the key is present
+        if data_limit_mb_str == "": # User wants to clear the limit
+            limit_bytes_total_for_service = "0" # Send "0" to effectively remove limit or set to 0 bytes
+        elif not data_limit_mb_str.isdigit() or int(data_limit_mb_str) < 0:
+            errors['dataLimit'] = _('Data limit must be a non-negative number (MB) or empty to clear.')
+        else:
+            # Valid number, prepare for service
+            limit_bytes_total_for_service = int(data_limit_mb_str) * 1024 * 1024
+
+    comment = raw_data.get('comment')
+    if comment is not None and len(comment) > 128:
+        errors['comment'] = _('Comment cannot exceed 128 characters.')
+
+    disabled_val = raw_data.get('disabled') # Expecting boolean true/false from JSON
+    if disabled_val is not None and not isinstance(disabled_val, bool):
+        errors['disabled'] = _('Disabled status must be a true/false value.')
+
+    if errors:
+        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+    # --- End Input Validation ---
+
+    # Construct the payload for the router_os_service, only including fields that were actually sent
+    payload_for_service = {}
+    if new_password is not None: # Allow empty string to clear password if Mikrotik supports, otherwise service might reject
+        payload_for_service['password'] = new_password
+    if profile is not None:
+        payload_for_service['profile'] = profile
+    if limit_uptime is not None: # Allow empty string to potentially clear limit
+        payload_for_service['limit-uptime'] = limit_uptime
+
+    if data_limit_mb_str is not None: # This means the dataLimit field was in the request
+        if limit_bytes_total_for_service == "0": # Explicitly clearing
+             payload_for_service['limit-bytes-total'] = 0 # Set to 0 for Mikrotik
+        elif limit_bytes_total_for_service is not None: # Is a number from valid input
+             payload_for_service['limit-bytes-total'] = limit_bytes_total_for_service
+        # If data_limit_mb_str was None, 'limit-bytes-total' is not added to payload_for_service
+
+    if comment is not None:
+        payload_for_service['comment'] = comment
+    if disabled_val is not None:
+        payload_for_service['disabled'] = 'true' if disabled_val else 'false'
+
+    if not payload_for_service: # Nothing to update
+        return jsonify({'success': True, 'message': _('No changes detected to update.')})
+
+    success, message = router_os_service.edit_hotspot_user(username, payload_for_service)
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/users/<username>', methods=['DELETE'])
@@ -1408,18 +1828,112 @@ def get_profiles_route():
 @login_required
 def create_profile_route():
     data = request.json
-    if not data.get('name'):
-        return jsonify({'success': False, 'message': _('Profile name is required.')}), 400
-    success, message = router_os_service.create_hotspot_profile(data)
+    errors = {}
+
+    # --- Input Validation for Create Profile ---
+    profile_name = data.get('name')
+    if not profile_name:
+        errors['name'] = _('Profile name is required.')
+    elif not (3 <= len(profile_name) <= 64):
+        errors['name'] = _('Profile name must be between 3 and 64 characters.')
+    # Potential regex for profile name characters (e.g., alphanumeric, hyphen, underscore)
+    # elif not re.match(r"^[a-zA-Z0-9_-]+$", profile_name):
+    #     errors['name'] = _('Profile name can only contain letters, numbers, underscore, and hyphen.')
+
+    rate_limit = data.get('rate-limit')
+    if rate_limit and not re.match(r"^((\d+[kKMGT]?/\d+[kKMGT]?)|(\d+[kKMGT]?))?$", rate_limit):
+        errors['rate-limit'] = _('Invalid rate limit format. Example: 512k/2M or 1M.')
+
+    session_timeout = data.get('session-timeout')
+    if session_timeout and not re.match(r"^((\d+[wdhms])+|none)?$", session_timeout): # 'none' is often valid for no timeout
+        errors['session-timeout'] = _('Invalid session timeout format. Example: 1d, 2h30m, or "none".')
+
+    shared_users_str = data.get('shared-users')
+    if shared_users_str:
+        try:
+            shared_users = int(shared_users_str)
+            if shared_users < 0: # 0 might mean unlimited or 1 depending on ROS, but negative is invalid
+                errors['shared-users'] = _('Shared users must be a non-negative number.')
+        except ValueError:
+            errors['shared-users'] = _('Shared users must be a valid number.')
+
+    if errors:
+        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+    # --- End Input Validation ---
+
+    # Prepare payload for service, ensuring only valid fields are passed
+    payload_for_service = {'name': profile_name}
+    if rate_limit:
+        payload_for_service['rate-limit'] = rate_limit
+    if session_timeout:
+        payload_for_service['session-timeout'] = session_timeout
+    if shared_users_str: # Use the validated integer if it was valid
+        payload_for_service['shared-users'] = str(shared_users) # Mikrotik API often expects strings for numbers too
+
+    success, message = router_os_service.create_hotspot_profile(payload_for_service)
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/profiles/<profile_id>', methods=['PUT'])
 @login_required
 def edit_profile_route(profile_id: str):
     data = request.json
-    if not data:
+    errors = {}
+
+    if not data: # No actual data sent
         return jsonify({'success': False, 'message': _('No data provided for update.')}), 400
-    success, message = router_os_service.edit_hotspot_profile(profile_id, data)
+
+    # --- Input Validation for Edit Profile ---
+    # All fields are optional, but if present, must be valid.
+    profile_name = data.get('name')
+    if profile_name is not None:
+        if not profile_name: # Cannot set to empty
+             errors['name'] = _('Profile name cannot be empty.')
+        elif not (3 <= len(profile_name) <= 64):
+            errors['name'] = _('Profile name must be between 3 and 64 characters.')
+        # elif not re.match(r"^[a-zA-Z0-9_-]+$", profile_name):
+        #     errors['name'] = _('Profile name can only contain letters, numbers, underscore, and hyphen.')
+
+    rate_limit = data.get('rate-limit')
+    if rate_limit is not None and rate_limit != "" and not re.match(r"^((\d+[kKMGT]?/\d+[kKMGT]?)|(\d+[kKMGT]?))?$", rate_limit):
+        errors['rate-limit'] = _('Invalid rate limit format. Example: 512k/2M or 1M, or empty to clear.')
+
+    session_timeout = data.get('session-timeout')
+    if session_timeout is not None and session_timeout != "" and not re.match(r"^((\d+[wdhms])+|none)?$", session_timeout):
+        errors['session-timeout'] = _('Invalid session timeout format. Example: 1d, 2h30m, "none", or empty to clear.')
+
+    shared_users_str = data.get('shared-users')
+    shared_users_for_service = None
+    if shared_users_str is not None:
+        if shared_users_str == "": # User wants to clear/unset
+            shared_users_for_service = "" # Send empty string to attempt to clear
+        else:
+            try:
+                shared_users_val = int(shared_users_str)
+                if shared_users_val < 0:
+                    errors['shared-users'] = _('Shared users must be a non-negative number or empty to clear.')
+                else:
+                    shared_users_for_service = str(shared_users_val)
+            except ValueError:
+                errors['shared-users'] = _('Shared users must be a valid number or empty to clear.')
+
+    if errors:
+        return jsonify({'success': False, 'message': _('Validation failed.'), 'errors': errors}), 400
+    # --- End Input Validation ---
+
+    payload_for_service = {}
+    if profile_name is not None:
+        payload_for_service['name'] = profile_name
+    if rate_limit is not None: # Allow empty string to clear
+        payload_for_service['rate-limit'] = rate_limit
+    if session_timeout is not None: # Allow empty string to clear
+        payload_for_service['session-timeout'] = session_timeout
+    if shared_users_for_service is not None: # This means it was provided and validated or explicitly cleared
+        payload_for_service['shared-users'] = shared_users_for_service
+
+    if not payload_for_service:
+         return jsonify({'success': True, 'message': _('No changes detected to update.')})
+
+    success, message = router_os_service.edit_hotspot_profile(profile_id, payload_for_service)
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/profiles/<profile_id>', methods=['DELETE'])
