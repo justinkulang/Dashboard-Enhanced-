@@ -93,13 +93,44 @@ For production, it is highly recommended to use a production-grade WSGI server l
 
 When deploying this application to a production environment, several considerations should be taken into account for security, reliability, and performance.
 
-### `SECRET_KEY` Configuration
-For session security, Flask uses a `SECRET_KEY`.
-*   **Action Required:** Set the `FLASK_SECRET_KEY` environment variable to a strong, unique, and random string. Do not use the default fallback key in production.
-*   The application will use the environment variable if set, otherwise, it falls back to a hardcoded development key and issues a warning.
+### Environment Variables for Configuration (Recommended for Production)
+
+For enhanced security and flexibility, especially in production, it's **highly recommended** to configure sensitive settings using environment variables. These take precedence over values defined in `config.json`.
+
+*   **`FLASK_SECRET_KEY` (Critical):** For session security.
+    *   Set this to a strong, unique, and random string.
+    *   Example: `export FLASK_SECRET_KEY='your_very_strong_random_secret_key'`
+*   **Application Admin Credentials:**
+    *   `APP_ADMIN_USERNAME`: The username for the web dashboard admin. (Defaults to `admin` from `config.json` if not set).
+    *   `APP_ADMIN_PASSWORD_HASH`: The Werkzeug-compatible password hash for the web dashboard admin.
+        *   Generate this hash using the provided `passwordg_generator.py` script or by running `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your_password'))"`.
+        *   Example: `export APP_ADMIN_PASSWORD_HASH='your_generated_werkzeug_hash'`
+        *   **Note:** If `APP_ADMIN_PASSWORD_HASH` is set as an environment variable, the in-app password change feature will be disabled for the admin user. Password changes must then be made by updating this environment variable and restarting the application. If this environment variable is not set, the password hash is managed via `config.json`, and the in-app password change feature (accessible in the Settings tab) can be used.
+*   **Mikrotik API Credentials:**
+    *   `MIKROTIK_HOST`: IP address or hostname of your Mikrotik router.
+    *   `MIKROTIK_PORT`: API port (default `8728`, or `8729` for SSL).
+    *   `MIKROTIK_USERNAME`: Mikrotik API username.
+    *   `MIKROTIK_PASSWORD`: Mikrotik API password.
+    *   `MIKROTIK_USE_SSL`: Set to `true` or `false` to enable/disable SSL for the API connection.
+    *   `MIKROTIK_HOTSPOT_LOGIN_URL`: The login URL for your hotspot (used for QR codes on vouchers). Example: `http://hotspot.example.com/login`
+*   **Server Settings (Optional Overrides):**
+    *   `SERVER_HOST`: Host for the web application to bind to (e.g., `0.0.0.0` or `127.0.0.1`).
+    *   `SERVER_PORT`: Port for the web application.
+    *   `FLASK_DEBUG`: Set to `true` or `false` to enable/disable Flask debug mode. Overrides `server.debug` in `config.json`.
+    *   `APP_ENV`: If set to `production`, Flask debug mode will be forced to `false`.
+
+If these environment variables are not set, the application will fall back to using the values from `config.json`. However, for production, relying on environment variables for secrets like `FLASK_SECRET_KEY`, `APP_ADMIN_PASSWORD_HASH`, and `MIKROTIK_PASSWORD` is strongly advised. The application will log warnings if it loads these sensitive values from `config.json` when not in debug mode.
+
+### `config.json` File
+The `config.json` file is still used for default values and for settings not typically managed by environment variables (like log file paths or specific feature flags if any are added later). Upon first run, if `config.json` is missing, a default version will be created.
 
 ### Debug Mode
-*   **Action Required:** Ensure that `debug` is set to `false` in the `server` section of your `config.json` for production. The application now defaults this to `false` if the key is missing or a new config is generated.
+*   **Action Required:** Ensure that Flask debug mode is `false` in production. This can be achieved by:
+    1.  Setting `server.debug` to `false` in `config.json`.
+    2.  Setting the `FLASK_DEBUG` environment variable to `false`.
+    3.  Setting the `APP_ENV` environment variable to `production`.
+*   The application defaults `server.debug` to `false` if the key is missing in `config.json` or if a new config file is generated.
+*   Running with `FLASK_DEBUG=true` or `server.debug=true` in production exposes security risks (like the Werkzeug debugger) and should be avoided.
 
 ### WSGI Server (Gunicorn)
 *   The provided `gunicorn_config.py` sets up Gunicorn to bind to the host and port specified in `config.json` (defaulting to `0.0.0.0:5000`).
